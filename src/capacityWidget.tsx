@@ -114,8 +114,34 @@ async function loadData(settings: { iterationId?: string; teamId?: string }): Pr
     if (!team) throw new Error("Configured team not found in project (id " + settings.teamId + "). Open widget configuration and pick a team.");
     log("using configured team=", team.name);
   } else {
-    team = teams[0];
-    log("defaulting to first team=", team.name, "(configure widget to choose a different team)");
+    // Bug B fix: try to detect the dashboard's owning team from the host page route
+    // before falling back to the first project team.
+    let dashboardTeamName: string | undefined;
+    try {
+      const nav: any = await SDK.getService("ms.vss-features.host-navigation-service");
+      if (nav && typeof nav.getPageRoute === "function") {
+        const route = await nav.getPageRoute();
+        const rv = (route && route.routeValues) || {};
+        dashboardTeamName = rv.team || rv.teamName || rv.teamId;
+        log("pageRoute.routeValues=", rv);
+      }
+    } catch (e) {
+      log("getPageRoute failed (non-fatal):", e);
+    }
+    if (dashboardTeamName) {
+      const match = teams.find((t: any) =>
+        t.name?.toLowerCase() === dashboardTeamName!.toLowerCase() ||
+        t.id?.toLowerCase() === dashboardTeamName!.toLowerCase()
+      );
+      if (match) {
+        team = match;
+        log("using dashboard team=", team.name);
+      }
+    }
+    if (!team) {
+      team = teams[0];
+      log("defaulting to first team=", team.name, "(configure widget to choose a different team)");
+    }
   }
 
   log("step:getTeamIterations");
@@ -202,6 +228,10 @@ async function loadData(settings: { iterationId?: string; teamId?: string }): Pr
   const personMap: { [userId: string]: PersonLoad } = {};
   let unassigned = 0;
 
+  // Bug A fix: only people in the team's capacity should appear as rows.
+  // Stories assigned to users outside the capacity list roll up to "Unassigned".
+  const capacityUserIds = new Set(Object.keys(capByUser));
+
   for (const s of stories) {
     const f = s.fields || {};
     const rw = Number(f["Microsoft.VSTS.Scheduling.RemainingWork"] || 0);
@@ -214,7 +244,7 @@ async function loadData(settings: { iterationId?: string; teamId?: string }): Pr
     }
     activityMap[activity].remainingHours += rw;
 
-    if (!assignee) {
+    if (!assignee || !capacityUserIds.has(assignee.id)) {
       unassigned += rw;
       continue;
     }
