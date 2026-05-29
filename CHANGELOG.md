@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.8
+- **Fix (#5, regression from 1.0.7):** Removed the team-membership intersection that dropped legitimate people. A person can have **capacity** without being a formal member of the team group (the `/teams/{id}/members` API does not return them), so v1.0.7 incorrectly hid them and rolled their work into **Unassigned**. The team's **Capacity list is now authoritative** for rows, matching the OOB Sprint Capacity pane. Cross-team work is still excluded by the area-path filter (#5a), which is the actual fix for the original bleed.
+
 ## v1.0.7
 - **Fix (#5, Bug):** Work is now scoped by the team's **area path(s)** (via `teamfieldvalues`), not iteration alone. Iterations are shared across teams, so stories owned by other teams in a shared sprint no longer bleed into this team's widget. Uses `UNDER` when the team includes child areas, exact match otherwise.
 - **Fix (#5, Bug):** Capacity rows are intersected with the team's **current member list** (`/teams/{id}/members`). Stale capacity entries for users who have left the team are dropped, so non-members (e.g., people showing `remaining/0` capacity) no longer appear.

@@ -183,34 +183,16 @@ async function loadData(settings: { iterationId?: string; teamId?: string }): Pr
   const capMembers: any[] = capResp.teamMembers || capResp.value || (Array.isArray(capResp) ? capResp : []);
   log("capacities members=", capMembers.length);
 
-  // Issue #5: the definitive row set is the team's actual MEMBER list. Capacity
-  // responses can retain stale entries for users who have left the team, so we
-  // intersect capacity with current membership. Anyone not a current member is
-  // dropped from the rows; their work later rolls up to "Unassigned".
-  log("step:getTeamMembers");
-  let memberIds: Set<string> | null = null;
-  try {
-    const membersResp = await adoGet(orgUrl, `/_apis/projects/${project.id}/teams/${team.id}/members?api-version=7.1-preview.2`);
-    const ids = (membersResp.value || [])
-      .map((m: any) => m.identity?.id)
-      .filter(Boolean);
-    if (ids.length) {
-      memberIds = new Set(ids);
-      log("team members=", ids.length);
-    }
-  } catch (e) {
-    log("getTeamMembers failed (non-fatal, capacity list used as-is):", e);
-  }
-
+  // The team's CAPACITY list is the authoritative set of rows, exactly like the
+  // OOB Sprint Capacity pane. A person can have capacity without being a formal
+  // member of the team group (the /teams/{id}/members API does not return them),
+  // so we must NOT intersect with that API or legitimate people get dropped and
+  // their work wrongly rolls up to "Unassigned". Cross-team noise is handled by
+  // the area-path filter below (Issue #5), not by membership.
   const capByUser: { [userId: string]: { user: any; activities: { name: string; capacityPerDay: number }[]; daysOff: number } } = {};
   for (const c of capMembers) {
     const memberId = c.teamMember?.id;
     if (!memberId) continue;
-    // Drop capacity entries that do not belong to a current team member.
-    if (memberIds && !memberIds.has(memberId)) {
-      log("skipping non-member capacity entry=", c.teamMember?.displayName);
-      continue;
-    }
     let daysOff = 0;
     for (const off of c.daysOff || []) {
       const s = new Date(off.start);
