@@ -182,27 +182,99 @@ async function loadData(settings: { iterationId?: string; teamId?: string }): Pr
   // API returns either { value: [...] } or { teamMembers: [...] } depending on flavor
   const capMembers: any[] = capResp.teamMembers || capResp.value || (Array.isArray(capResp) ? capResp : []);
   log("capacities members=", capMembers.length);
+
+  // Issue #5: the definitive row set is the team's actual MEMBER list. Capacity
+  // responses can retain stale entries for users who have left the team, so we
+  // intersect capacity with current membership. Anyone not a current member is
+  // dropped from the rows; their work later rolls up to "Unassigned".
+  log("step:getTeamMembers");
+  let memberIds: Set<string> | null = null;
+  try {
+    const membersResp = await adoGet(orgUrl, `/_apis/projects/${project.id}/teams/${team.id}/members?api-version=7.1-preview.2`);
+    const ids = (membersResp.value || [])
+      .map((m: any) => m.identity?.id)
+      .filter(Boolean);
+    if (ids.length) {
+      memberIds = new Set(ids);
+      log("team members=", ids.length);
+    }
+  } catch (e) {
+    log("getTeamMembers failed (non-fatal, capacity list used as-is):", e);
+  }
+
   const capByUser: { [userId: string]: { user: any; activities: { name: string; capacityPerDay: number }[]; daysOff: number } } = {};
   for (const c of capMembers) {
+    const memberId = c.teamMember?.id;
+    if (!memberId) continue;
+    // Drop capacity entries that do not belong to a current team member.
+    if (memberIds && !memberIds.has(memberId)) {
+      log("skipping non-member capacity entry=", c.teamMember?.displayName);
+      continue;
+    }
     let daysOff = 0;
     for (const off of c.daysOff || []) {
       const s = new Date(off.start);
       const e = new Date(off.end);
       daysOff += workingDaysBetween(s, e, weekends);
     }
-    capByUser[c.teamMember.id] = {
+    capByUser[memberId] = {
       user: c.teamMember,
       activities: c.activities || [],
       daysOff
     };
   }
 
+  // Issue #5: scope work by the team's AREA PATH(s), not iteration alone.
+  // Iteration paths are shared across teams, so without an area-path filter a
+  // story owned by another team in the same sprint bleeds into this team's view.
+  log("step:getTeamFieldValues");
+  let areaClause = "";
+  try {
+    const tfv = await adoGet(orgUrl, `/${encodeURIComponent(project.name)}/${encodeURIComponent(team.name)}/_apis/work/teamsettings/teamfieldvalues?api-version=7.1-preview.1`);
+    const isAreaPath = (tfv.field?.referenceName || "System.AreaPath") === "System.AreaPath";
+    const vals: { value: string; includeChildren: boolean }[] = tfv.values || [];
+    if (isAreaPath && vals.length) {
+      const parts = vals.map(v => {
+        const escaped = String(v.value).replace(/'/g, "''");
+        return v.includeChildren
+          ? `[System.AreaPath] UNDER '${escaped}'`
+          : `[System.AreaPath] = '${escaped}'`;
+      });
+      areaClause = ` AND ( ${parts.join(" OR ")} )`;
+      log("areaClause=", areaClause);
+    } else {
+      log("teamfieldvalues not area-path based or empty; skipping area filter");
+    }
+  } catch (e) {
+    log("getTeamFieldValues failed (non-fatal, falling back to iteration-only):", e);
+  }
+
+  // Issue #4: include every work item type in the team's REQUIREMENT backlog
+  // (Stories category), not just 'User Story'. Custom processes map many types
+  // (Action, CHW Ticket, ESM Ticket, Work Request, ...) to this category.
+  log("step:getRequirementTypes");
+  let typeClause = "[System.WorkItemType] = 'User Story'";
+  try {
+    const backlogs = await adoGet(orgUrl, `/${encodeURIComponent(project.name)}/${encodeURIComponent(team.name)}/_apis/work/backlogs?api-version=7.1-preview.1`);
+    const reqCat = (backlogs.value || []).find((b: any) => b.id === "Microsoft.RequirementCategory");
+    const typeNames: string[] = (reqCat?.workItemTypes || []).map((t: any) => t.name).filter(Boolean);
+    if (typeNames.length) {
+      const list = typeNames.map(n => `'${String(n).replace(/'/g, "''")}'`).join(", ");
+      typeClause = `[System.WorkItemType] IN (${list})`;
+      log("requirement types=", typeNames);
+    } else {
+      log("no requirement-category types found; defaulting to 'User Story'");
+    }
+  } catch (e) {
+    log("getRequirementTypes failed (non-fatal, defaulting to 'User Story'):", e);
+  }
+
   log("step:queryByWiql");
   const wiql = {
     query: `SELECT [System.Id] FROM workitems
             WHERE [System.TeamProject] = @project
-              AND [System.WorkItemType] = 'User Story'
-              AND [System.IterationPath] = '${iter.path.replace(/'/g, "''")}'`
+              AND ${typeClause}
+              AND [System.IterationPath] = '${iter.path.replace(/'/g, "''")}'${areaClause}`
   };
   const qr = await adoPost(orgUrl, `/${project.id}/${team.id}/_apis/wit/wiql?api-version=7.1-preview.2`, wiql);
   const ids = (qr.workItems || []).map((w: any) => w.id);
